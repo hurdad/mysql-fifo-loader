@@ -1,5 +1,8 @@
 #ifndef MYSQLFIFOLOADER_HPP_
 #define MYSQLFIFOLOADER_HPP_
+#include <sstream> //string stream
+#include <sys/types.h> //mkfifo
+#include <sys/stat.h> //mkfifo
 
 namespace MySQLFIFOLoaderNS {
 
@@ -11,6 +14,7 @@ struct MySQLConfig {
 	string password;
 	int port;
 	string db;
+	string charset;
 };
 
 class MySQLFIFOLoader {
@@ -20,47 +24,59 @@ public:
 
 	}
 	virtual ~MySQLFIFOLoader() {
-		fclose(_fh);
-		pclose(_ph);
+
+		//this will cause the transaction to commit on mysql]
+		if (_fh)
+			fclose(_fh);
+
+		//delete tmp  fifo file
+		remove(_fifo_path);
+
+		//close mysql client process to avoid zombies
+		if (_ph)
+			pclose(_ph);
+
 	}
 
-	//returns
+	//returns fifo FILE* handler
 	FILE* startFIFO(string table, string delimiter, string terminator) {
 
 		//get tmp file name
-		char *fifo_path = tmpnam(NULL);
+		_fifo_path = tmpnam(NULL);
 
 		//init fifo
-		if (!mkfifo(fifo_path, 0444))
+		if (mkfifo(_fifo_path, 0666) == -1)
 			return NULL;
 
 		//build sql
-		string load;
-		load = "LOAD DATA LOCAL INFILE \"" + string(fifo_path)
-				+ "\"  INTO TABLE `" + _myconf.db + "`.`" + table
-				+ "` CHARACTER SET " + _charset + " ";
+		stringstream ss_sql_load;
+		ss_sql_load << "LOAD DATA LOCAL INFILE \"" << string(_fifo_path)
+				<< "\"  INTO TABLE `" << _myconf.db << "`.`" << table
+				<< "` CHARACTER SET " << _myconf.charset << "\n";
+		ss_sql_load << " FIELDS TERMINATED BY \"" << delimiter << "\"\n";
+		ss_sql_load << " LINES TERMINATED BY \"" << terminator << "\"";
 
-		//    mysql_cmd = "mysql -u{$shard['user']} -h{$shard['host']} -P{$shard['port']} {$shard['db']}";
-		//    if (!empty($shard['password']) && trim($shard['password'])) {
-		//      	mysql_cmd += " -p{$shard['password']}";
-		// }
-		//  mysql_cmd += " -e '{$load}'";
-
-		string mysql_cmd = "mysql ";
+		//build mysql client cmd
+		stringstream ss_mysql_cmd;
+		ss_mysql_cmd << "mysql -u " << _myconf.username << " -p"
+				<< _myconf.password << " -h " << _myconf.hostname << " -P "
+				<< _myconf.port << " -D " << _myconf.db << " -e '"
+				<< ss_sql_load.str() << "'";
 
 		//submit LOAD sql via mysql client
-		if ((_ph = popen(mysql_cmd.c_str(), "r")) == NULL)
+		_ph = popen(ss_mysql_cmd.str().c_str(), "r");
+		if (_ph == NULL)
 			return NULL;
 
 		//open fifo file for writing
-		_fh = fopen(fifo_path, "wb");
+		_fh = fopen(_fifo_path, "wb");
 
 		//return fifo file handler
 		return _fh;
 
 	}
 private:
-	string _charset;
+	char * _fifo_path;
 	MySQLConfig _myconf;
 	FILE *_fh;
 	FILE *_ph;
